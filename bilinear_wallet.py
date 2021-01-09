@@ -1,13 +1,9 @@
 import random
-import os
-import bn256
 import math
-from bplib.bp import BpGroup
-from bplib.bp import G1Elem
-from inspect import getmembers, isfunction
-from pyseltongue import SecretSharer
-from pyseltongue import secret_int_to_points, points_to_secret_int
-
+from bplib.bp import BpGroup, G1Elem
+import pyseltongue
+from pyseltongue.primes import get_large_enough_prime
+from pyseltongue.polynomials import random_polynomial, get_polynomial_points
 
 class PrivateKeyGenerator:
     def __init__(self):
@@ -27,8 +23,8 @@ class PrivateKeyGenerator:
 
     def select_s(self, q):
         #self.s = random.randint(0, int(q))tak powinno byc
-        self.s = random.randint(0, math.floor(math.sqrt(4294967294))) #tak działa bo to max 32-intiger, przemyśleć co z tym zrobić
-        print("s: " + str(self.s))
+        self.s = random.randint(0, math.floor(math.sqrt(q)))
+        #print("s: " + str(self.s))
         #print("Selected random s")
 
     def set_P_pub(self):
@@ -76,27 +72,104 @@ class PublicBoard:
         self.user_id = user_id
 
 class ProxySigner:
-    def __init__(self):
-        print("Instance of Proxy Signer created")
+    def __init__(self, id):
+        print("Instance of ProxySigner created with ID: " + str(id))
+        self.id = id
+        self.Aprim_i_received = []
+        self.B_group = []
+        self.E = []
+
+    def receive_share_and_committment(self, x_idi, committment):
+        self.x_idi = x_idi
+        self.aiP2 = committment #aiP2 ??
+        #print("Share and committments were received")
+
+    def compute_A_i(self, m, G):
+        msg = str(self.id) + m
+        #print("msg: " + msg)
+        #print(self.x_idi)
+        self.P_m = G.hashG1(msg.encode('utf-8'))
+        #print(self.P_m)
+        self.A_i = self.P_m.mul(self.x_idi[1])
+        #print(self.A_i)
+        #print("Ai was calculated")
+
+    def receive_C_proxy(self, C_proxy):
+        self.C_proxy = C_proxy
+
+    def receive_I_kwt(self, I_kwt):
+        self.I_kwt = I_kwt
+
+    def compute_A_pg(self, x_id):
+        #print("################" + str(x_id))
+        self.A = self.P_m.mul(x_id)
+
+    def receive_B(self, B):
+        self.B = B
+
+    def compute_x_i(self):
+        self.x_i = random.randint(0, 2147483647)
+        print("x_i: " + str(self.x_i))
+
+    def compute_Aprim_i(self, G, m, w, t, UGprim):
+        w_to_str = '&'.join([str(elem) for elem in w])
+        UGprim_to_str = '&'.join([str(elem) for elem in UGprim])
+        M = m + '$' + w_to_str + '$' + str(t) + '$' + UGprim_to_str
+        msg = str(self.id) + m
+        self.P_M = G.hashG1(msg.encode('utf-8'))
+        self.Aprim_i = self.P_M.mul(self.x_i)
+        #print("Aprimi calculated")
+
+    def compute_B_i(self, P):
+        self.B_i = P.mul(self.x_i)
+        #print("B_i calculated")
+
+    def send_Aprim_i(self):
+        #print("Sending Aprim_i")
+        return self.Aprim_i
+
+    def receive_Aprim_i(self, Aprim_i):
+        self.Aprim_i_received.append(Aprim_i)
+        #print("Aprim_i received")
+
+    def receive_B_i(self, B_i):
+        self.B_group.append(B_i)
+        #print("B_i received")
+
+    def send_B_i(self):
+        #print("Sending B_i")
+        return self.B_i
+
+    def compute_complete_signature(self):
+        E = [self.Aprim_i] + self.Aprim_i_received
+        #print("Returning complete signature")
+        #print(self.A_i)
+        return (self.A, self.B, self.C_proxy, self.I_kwt, self.B_group, E)
+
 
 class User:
     def __init__(self, id):
         print("Instance of User created with ID: " + str(id))
         self.id = id
-        self.Ais = []
-        self.Aprim_i_received = []
-        self.B_group = []
-        self.E = []
         self.signatures = []
+
+    def secret_int_to_points(secret_int, point_threshold, num_points, prime=None):
+        if point_threshold < 2:
+            raise ValueError("Threshold must be >= 2.")
+        if point_threshold > num_points:
+            raise ValueError("Threshold must be < the total number of points.")
+        if not prime:
+            prime = get_large_enough_prime([secret_int, num_points])
+            if not prime:
+                raise ValueError("Error! Secret is too long for share calculation!")
+        coefficients = random_polynomial(point_threshold-1, secret_int, prime)
+        points = get_polynomial_points(coefficients, num_points, prime)
+        return points, coefficients, prime
 
     def select_k(self):
         self.k = random.randint(0, math.floor(math.sqrt(4294967294)))
         print("k: " + str(self.k))
         #print("Selected random k")
-
-    def compute_x_i(self):
-        self.x_i = random.randint(0, 2147483647)
-        print("x_i: " + str(self.x_i))
 
     def compute_warrant(self, UG):
         self.warrant = []
@@ -141,7 +214,7 @@ class User:
         #print("Signature from PKG was received")
 
     def shamir_split(self, secret, share_threshold, num_shares, P):
-        self.shares, self.coefficients, self.prime = secret_int_to_points(secret, share_threshold, num_shares)
+        self.shares, self.coefficients, self.prime = pyseltongue.secret_int_to_points(secret, share_threshold, num_shares)
         self.aiP = []
         for c in self.coefficients:
             self.aiP.append(P.mul(c))
@@ -166,38 +239,6 @@ class User:
     def shamir_recover(self, shares): #na razie nieużywane
         self.recovered_secret = SecretSharer.points_to_secret_int(shares)
 
-    def receive_share_and_committment(self, x_idi, committment):
-        self.x_idi = x_idi
-        self.aiP2 = committment #aiP2 ??
-        #print("Share and committments were received")
-
-    def compute_A_i(self, m, G):
-        msg = str(self.id) + m
-        #print("msg: " + msg)
-        #print(self.x_idi)
-        self.P_m = G.hashG1(msg.encode('utf-8'))
-        #print(self.P_m)
-        self.A_i = self.P_m.mul(self.x_idi[1])
-        #print(self.A_i)
-        #print("Ai was calculated")
-
-    def compute_Aprim_i(self, G, m, w, t, UGprim):
-        w_to_str = '&'.join([str(elem) for elem in w])
-        UGprim_to_str = '&'.join([str(elem) for elem in UGprim])
-        M = m + '$' + w_to_str + '$' + str(t) + '$' + UGprim_to_str
-        msg = str(self.id) + m
-        self.P_M = G.hashG1(msg.encode('utf-8'))
-        self.Aprim_i = self.P_M.mul(self.x_i)
-        #print("Aprimi calculated")
-
-    def send_Aprim_i(self):
-        #print("Sending Aprim_i")
-        return self.Aprim_i
-
-    def receive_Aprim_i(self, Aprim_i):
-        self.Aprim_i_received.append(Aprim_i)
-        #print("Aprim_i received")
-
     def compute_B(self, P):
         self.B = P.mul(self.x_id)
         #print("Computed B **************************** " + str(self.x_id))
@@ -218,40 +259,9 @@ class User:
             H = G.hashG1(msg2.encode('utf-8'))
             E.append(H.mul(self.xi))
 
-    def compute_A_pg(self, x_id):
-        #print("################" + str(x_id))
-        self.A = self.P_m.mul(x_id)
-
-    def receive_B(self, B):
-        self.B = B
-        
-    def compute_B_i(self, P):
-        self.B_i = P.mul(self.x_i)
-        #print("B_i calculated")
-
-    def send_B_i(self):
-        #print("Sending B_i")
-        return self.B_i
-
-    def receive_B_i(self, B_i):
-        self.B_group.append(B_i)
-        #print("B_i received")
-
-    def compute_complete_signature(self):
-        E = [self.Aprim_i] + self.Aprim_i_received
-        #print("Returning complete signature")
-        #print(self.A_i)
-        return (self.A, self.B, self.C_proxy, self.I_kwt, self.B_group, E)
-
     def receive_signature(self, signature):
         self.signatures.append(signature)
         #print("Signature received")
-
-    def receive_C_proxy(self, C_proxy):
-        self.C_proxy = C_proxy
-
-    def receive_I_kwt(self, I_kwt):
-        self.I_kwt = I_kwt
 
     def select_actual_proxy_signers(self, amount, threshold):
         #print("UG' selected")
@@ -304,7 +314,7 @@ pkg = PrivateKeyGenerator()
 def setup():
     pkg.generate_groups()
     pkg.choose_generator()
-    pkg.select_s(7) #7 na razie nieużywane
+    pkg.select_s(4294967294)
     pkg.set_P_pub()
     pkg.compute_public_parameters()
 
@@ -312,6 +322,7 @@ setup()
 
 user = User(1)
 def extract():
+    pyseltongue.secret_int_to_points = User.secret_int_to_points
     user.select_k()
     user.compute_commitment(pkg.return_P())
     user.receive_P_ver(pkg.compute_P_ver(user.send_committment()))
@@ -322,7 +333,7 @@ extract()
 
 n = 5
 threshold = 3
-proxy_users = [User(i) for i in range (2, n+2)]
+proxy_users = [ProxySigner(i) for i in range (2, n+2)]
 #for u in proxy_users:
     #print(u.id)
 
